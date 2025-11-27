@@ -12,33 +12,48 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      # 1. Setup Environment
-      - name: Get Date
-        id: get-date
+      # 1. Setup Python Environment
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      # 2. Install Linux Dependencies (The stuff Buildozer needs)
+      - name: Install System Dependencies
         run: |
-          echo "date=$(date -u "+%Y%m%d")" >> $GITHUB_OUTPUT
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3-pip build-essential git python3 \
+            python3-dev ffmpeg libsdl2-dev libsdl2-image-dev \
+            libsdl2-mixer-dev libsdl2-ttf-dev libportmidi-dev \
+            libswscale-dev libavformat-dev libavcodec-dev \
+            zlib1g-dev libgstreamer1.0 \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good
 
-      - name: Cache Buildozer
-        uses: actions/cache@v3
-        with:
-          path: .buildozer_global
-          key: buildozer-global-${{ hashFiles('buildozer.spec') }}
+      # 3. Install Buildozer
+      - name: Install Buildozer
+        run: |
+          pip install buildozer cython==0.29.33
 
-      - name: Cache Buildozer Dir
-        uses: actions/cache@v3
-        with:
-          path: .buildozer
-          key: ${{ runner.os }}-${{ steps.get-date.outputs.date }}-${{ hashFiles('buildozer.spec') }}
+      # 4. Configure Buildozer (Force correct settings)
+      - name: Configure Buildozer
+        run: |
+          # Initialize or overwrite existing spec to ensure safety
+          buildozer init
+          # Force requirements to be Pure Python (No Cryptography library)
+          sed -i 's/requirements = python3,kivy/requirements = python3,kivy,kivymd,ecdsa/g' buildozer.spec
+          # Set App Name
+          sed -i 's/title = My Application/title = SecureHealth/g' buildozer.spec
+          sed -i 's/package.name = myapp/package.name = securehealth/g' buildozer.spec
+          # Auto-accept licenses so it doesn't freeze asking "Yes/No"
+          sed -i 's/android.accept_sdk_license = False/android.accept_sdk_license = True/g' buildozer.spec
 
-      # 2. Build the APK
-      - name: Build with Buildozer
-        uses: ArtemSBulgakov/buildozer-action@v1
-        id: buildozer
-        with:
-          command: buildozer android debug
-          buildozer_version: master
+      # 5. Build the APK
+      - name: Build APK
+        run: |
+          yes | buildozer android debug
 
-      # 3. Upload the APK so you can download it
+      # 6. Upload the Result
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
