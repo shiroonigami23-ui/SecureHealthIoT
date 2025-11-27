@@ -12,13 +12,13 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      # 1. Setup Python Environment
+      # 1. Setup Python
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      # 2. Install Linux Dependencies (The stuff Buildozer needs)
+      # 2. Install Linux Dependencies
       - name: Install System Dependencies
         run: |
           sudo apt-get update
@@ -35,17 +35,19 @@ jobs:
         run: |
           pip install buildozer cython==0.29.33
 
-      # 4. Configure Buildozer (Force correct settings)
+      # 4. Configure Buildozer (Safe Mode)
       - name: Configure Buildozer
         run: |
-          # Initialize or overwrite existing spec to ensure safety
-          buildozer init
-          # Force requirements to be Pure Python (No Cryptography library)
-          sed -i 's/requirements = python3,kivy/requirements = python3,kivy,kivymd,ecdsa/g' buildozer.spec
-          # Set App Name
-          sed -i 's/title = My Application/title = SecureHealth/g' buildozer.spec
-          sed -i 's/package.name = myapp/package.name = securehealth/g' buildozer.spec
-          # Auto-accept licenses so it doesn't freeze asking "Yes/No"
+          # --- FIX: We skip 'buildozer init' because the file exists ---
+          
+          # Force requirements to be Pure Python (Replace entire line)
+          sed -i 's/^requirements =.*/requirements = python3,kivy,kivymd,ecdsa/' buildozer.spec
+          
+          # Force Title and Package Name
+          sed -i 's/^title =.*/title = SecureHealth/' buildozer.spec
+          sed -i 's/^package.name =.*/package.name = securehealth/' buildozer.spec
+          
+          # Auto-accept licenses
           sed -i 's/android.accept_sdk_license = False/android.accept_sdk_license = True/g' buildozer.spec
 
       # 5. Build the APK
