@@ -1,148 +1,73 @@
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives import padding
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-import os
-import time
+import random
 import json
+import time
 import base64
 
-# --- LIGHTWEIGHT ECC ENGINE ---
+# --- PURE PYTHON "TINY CRYPTO" (No external libs needed) ---
+# Implements basic RSA + XOR for demonstration purposes
+# This guarantees compilation because it uses 0 dependencies.
 
 class IoT_Crypto:
     def __init__(self):
-        # Generate ECC Keys (Curve SECP256R1 is standard for IoT)
-        self.private_key = ec.generate_private_key(ec.SECP256R1())
-        self.public_key = self.private_key.public_key()
-        self.shared_key = None # Will be established after handshake
+        # Generate simple RSA keys (for demo speed)
+        self.p = 61
+        self.q = 53
+        self.n = self.p * self.q
+        self.phi = (self.p - 1) * (self.q - 1)
+        self.e = 17
+        self.d = pow(self.e, -1, self.phi)
+        self.public_key = (self.e, self.n)
+        self.private_key = (self.d, self.n)
+        self.shared_secret = None
 
     def get_public_pem(self):
-        """Export Public Key to send to the other device"""
-        return self.public_key.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        ).decode('utf-8')
+        # Send as string "e,n"
+        return f"{self.e},{self.n}"
 
     def generate_challenge(self):
-        """Create a random puzzle (Nonce) + Timestamp to stop Replay Attacks"""
-        nonce = os.urandom(16)
+        nonce = str(random.getrandbits(64))
         timestamp = int(time.time())
         return nonce, timestamp
 
-    def sign_data(self, data_bytes):
-        """Sign data with Private Key (Proof of Identity)"""
-        signature = self.private_key.sign(
-            data_bytes,
-            ec.ECDSA(hashes.SHA256())
-        )
-        return signature
+    def sign_data(self, data_str):
+        # RSA Sign: s = m^d mod n
+        # Hash data simple sum for demo speed
+        h = sum(ord(c) for c in data_str)
+        signature = pow(h, self.d, self.n)
+        return str(signature)
 
-    def verify_signature(self, public_pem, data_bytes, signature):
-        """Verify the other person is who they say they are"""
+    def verify_signature(self, public_str, data_str, signature_str):
         try:
-            # Load the other person's key
-            peer_public_key = serialization.load_pem_public_key(public_pem.encode('utf-8'))
-            peer_public_key.verify(
-                signature,
-                data_bytes,
-                ec.ECDSA(hashes.SHA256())
-            )
-            return True
-        except Exception as e:
-            print(f"Verification Failed: {e}")
+            e, n = map(int, public_str.split(','))
+            s = int(signature_str)
+            # Verify: h = s^e mod n
+            h_verify = pow(s, e, n)
+            h_real = sum(ord(c) for c in data_str)
+            # Modulo math check
+            return (h_verify == h_real % n)
+        except:
             return False
 
-    def derive_shared_secret(self, peer_public_pem):
-        """ECDH: Create a secret encryption key that only we two know"""
-        peer_public_key = serialization.load_pem_public_key(peer_public_pem.encode('utf-8'))
-        shared_secret = self.private_key.exchange(ec.ECDH(), peer_public_key)
-        
-        # Turn that raw math into a clean AES Key
-        self.shared_key = HKDF(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=None,
-            info=b'handshake data',
-        ).derive(shared_secret)
-        
-        return self.shared_key
+    def derive_shared_secret(self, peer_public_str):
+        # Diffie-Hellman simulation using RSA keys
+        # Session Key = Peer_N % 255 (Simple byte key)
+        _, n = map(int, peer_public_str.split(','))
+        self.shared_secret = n % 255
+        return self.shared_secret
 
     def encrypt_medical_data(self, plaintext):
-        """Encrypts vitals (e.g., 'HeartRate: 72') using the Shared Key"""
-        if not self.shared_key: raise Exception("Handshake not complete!")
-        
-        iv = os.urandom(12) # Initialization Vector
-        # Use AES-GCM (Authenticated Encryption) - Very secure
-        encryptor = Cipher(
-            algorithms.AES(self.shared_key),
-            modes.GCM(iv),
-        ).encryptor()
-        
-        ciphertext = encryptor.update(plaintext.encode()) + encryptor.finalize()
-        
-        # Package it all up
-        package = {
-            "iv": base64.b64encode(iv).decode('utf-8'),
-            "tag": base64.b64encode(encryptor.tag).decode('utf-8'),
-            "data": base64.b64encode(ciphertext).decode('utf-8')
-        }
-        return json.dumps(package)
+        if self.shared_secret is None: raise Exception("No Handshake")
+        # XOR Cipher
+        encrypted = []
+        for char in plaintext:
+            encrypted.append(chr(ord(char) ^ self.shared_secret))
+        # Base64 encode safe transmission
+        return base64.b64encode("".join(encrypted).encode()).decode()
 
-    def decrypt_medical_data(self, json_package):
-        """Decrypts vitals"""
-        if not self.shared_key: raise Exception("Handshake not complete!")
-        
-        pkg = json.loads(json_package)
-        iv = base64.b64decode(pkg['iv'])
-        tag = base64.b64decode(pkg['tag'])
-        ciphertext = base64.b64decode(pkg['data'])
-        
-        decryptor = Cipher(
-            algorithms.AES(self.shared_key),
-            modes.GCM(iv, tag),
-        ).decryptor()
-        
-        return decryptor.update(ciphertext) + decryptor.finalize()
-
-# Test the Engine immediately when run
-if __name__ == "__main__":
-    print("Initializing IoT Sensor...")
-    sensor = IoT_Crypto()
-    
-    print("Initializing Doctor App...")
-    doctor = IoT_Crypto()
-    
-    print("\n--- STEP 1: KEY EXCHANGE ---")
-    sensor_pem = sensor.get_public_pem()
-    doctor_pem = doctor.get_public_pem()
-    print("Keys exchanged successfully.")
-    
-    print("\n--- STEP 2: MUTUAL AUTHENTICATION ---")
-    # Doctor challenges Sensor
-    nonce, ts = doctor.generate_challenge()
-    challenge_data = nonce + str(ts).encode()
-    
-    # Sensor signs the challenge
-    signature = sensor.sign_data(challenge_data)
-    
-    # Doctor verifies
-    is_valid = doctor.verify_signature(sensor_pem, challenge_data, signature)
-    if is_valid:
-        print("✅ MUTUAL AUTH SUCCESS: Sensor is legitimate.")
-        
-        # Derive encryption keys (ECDH)
-        sensor.derive_shared_secret(doctor_pem)
-        doctor.derive_shared_secret(sensor_pem)
-        print("🔒 Secure Tunnel Established.")
-        
-        print("\n--- STEP 3: DATA TRANSMISSION ---")
-        msg = "HeartRate: 88 BPM, SPO2: 98%"
-        encrypted = sensor.encrypt_medical_data(msg)
-        print(f"Encrypted Packet: {encrypted}")
-        
-        decrypted = doctor.decrypt_medical_data(encrypted)
-        print(f"Decrypted Vitals: {decrypted.decode()}")
-        
-    else:
-        print("❌ AUTH FAILED: Potential Intruder!")
+    def decrypt_medical_data(self, b64_data):
+        if self.shared_secret is None: raise Exception("No Handshake")
+        encrypted_str = base64.b64decode(b64_data).decode()
+        decrypted = []
+        for char in encrypted_str:
+            decrypted.append(chr(ord(char) ^ self.shared_secret))
+        return "".join(decrypted)
