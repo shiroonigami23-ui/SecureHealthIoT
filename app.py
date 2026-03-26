@@ -17,7 +17,7 @@ if not Path(BUNDLE_PATH).exists():
     )
 
 predictor = DiseasePredictor(BUNDLE_PATH)
-symptom_vocab = predictor.vectorizer.symptom_vocab
+symptom_vocab = predictor.symptom_vocab
 
 
 def _format_precautions(items):
@@ -73,9 +73,8 @@ with gr.Blocks(title="SecureHealthIoT Disease Predictor") as demo:
         precautions_out = gr.Markdown(label="Precautions")
 
     submit.click(infer, inputs=[symptom_input], outputs=[prob_out, detail_out, precautions_out])
-    clear.click(lambda: (None, "", ""), inputs=[], outputs=[symptom_input, detail_out, precautions_out])
+    clear.click(lambda: (None, None, ""), inputs=[], outputs=[symptom_input, detail_out, precautions_out])
 
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=7860)
-

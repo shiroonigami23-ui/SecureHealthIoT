@@ -11,6 +11,7 @@ SPACE_APP = r'''
 import json
 import gradio as gr
 import joblib
+import numpy as np
 from huggingface_hub import hf_hub_download
 
 MODEL_REPO_ID = "REPLACE_MODEL_REPO"
@@ -19,14 +20,25 @@ bundle_path = hf_hub_download(repo_id=MODEL_REPO_ID, filename="latest_model.jobl
 bundle = joblib.load(bundle_path)
 model = bundle["model"]
 label_encoder = bundle["label_encoder"]
-vectorizer = bundle["vectorizer"]
-aux = bundle["aux"]
+vectorizer = bundle.get("vectorizer")
+symptom_binarizer = bundle.get("symptom_binarizer")
+aux = bundle.get("aux", {"descriptions": {}, "precautions": {}})
+
+def normalize(symptoms):
+    return sorted(set([s.strip().lower().replace(" ", "_") for s in symptoms if s and s.strip()]))
+
+def transform(symptoms):
+    if vectorizer is not None:
+        return vectorizer.transform([symptoms])
+    if symptom_binarizer is not None:
+        return symptom_binarizer.transform([symptoms]).astype(np.float32)
+    raise RuntimeError("No vectorizer/symptom_binarizer found in model bundle.")
 
 def predict(symptoms):
     if not symptoms:
         return "Please select at least one symptom.", "", ""
-    normalized = sorted(set([s.strip().lower().replace(" ", "_") for s in symptoms if s.strip()]))
-    X = vectorizer.transform([normalized])
+    normalized = normalize(symptoms)
+    X = transform(normalized)
     probs = model.predict_proba(X)[0]
     top_idx = probs.argsort()[::-1][:3]
     pred = []
@@ -44,7 +56,12 @@ def predict(symptoms):
     precaution_text = "\n".join([f"- {p}" for p in details["precautions"]]) if details["precautions"] else "N/A"
     return pretty, json.dumps(details, indent=2), precaution_text
 
-symptoms = list(vectorizer.mlb.classes_)
+if vectorizer is not None and hasattr(vectorizer, "symptom_vocab"):
+    symptoms = list(vectorizer.symptom_vocab)
+elif symptom_binarizer is not None and hasattr(symptom_binarizer, "classes_"):
+    symptoms = list(symptom_binarizer.classes_)
+else:
+    symptoms = []
 
 with gr.Blocks(title="SecureHealthIoT Disease Predictor") as demo:
     gr.Markdown("# SecureHealthIoT Disease Predictor")
@@ -104,4 +121,3 @@ Model source: `{args.model_repo_id}`.
 
 if __name__ == "__main__":
     main()
-

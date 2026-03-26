@@ -1,0 +1,17 @@
+{
+  "id": "aryansingh21fd/securehealthiot-disease-trainer-v1",
+  "title": "SecureHealthIoT Disease Trainer V1",
+  "code_file": "train_kaggle.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_tpu": "false",
+  "enable_internet": "true",
+  "dataset_sources": [
+    "itachi9604/disease-symptom-description-dataset"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

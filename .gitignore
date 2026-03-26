@@ -25,3 +25,7 @@ kaggle.json
 # Scratch/debug files
 __*.py
 __*.sh
+
+# Local run outputs
+kaggle_outputs/
+kaggle_pull/
