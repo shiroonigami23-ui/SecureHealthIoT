@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -81,6 +83,49 @@ def _multiclass_brier(y_true: np.ndarray, probs: np.ndarray) -> float:
     return float(np.mean(np.sum((probs - one_hot) ** 2, axis=1)))
 
 
+def _normalize_label(s: str) -> str:
+    t = str(s).strip().lower().replace("_", " ")
+    t = re.sub(r"[^a-z0-9]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _align_label(norm_label: str, available_norm_labels: list[str]) -> str | None:
+    if norm_label in available_norm_labels:
+        return norm_label
+    match = difflib.get_close_matches(norm_label, available_norm_labels, n=1, cutoff=0.82)
+    return match[0] if match else None
+
+
+def evaluate_ood_dataset(calibrated, label_encoder, vectorizer, ood_df):
+    ood_samples, ood_labels = extract_samples(ood_df)
+    if not ood_samples:
+        return {"available": False, "reason": "No valid rows in OOD dataset"}
+
+    train_label_norm = {_normalize_label(x): x for x in label_encoder.classes_}
+    train_keys = list(train_label_norm.keys())
+    ood_norm = [_normalize_label(x) for x in ood_labels]
+    aligned = [_align_label(lbl, train_keys) for lbl in ood_norm]
+    keep_idx = [i for i, lbl in enumerate(aligned) if lbl is not None]
+    if len(keep_idx) < 20:
+        return {"available": False, "reason": "Insufficient overlapping classes with training dataset"}
+
+    X_ood = vectorizer.transform([ood_samples[i] for i in keep_idx])
+    y_ood_labels = [train_label_norm[aligned[i]] for i in keep_idx]
+    y_ood = label_encoder.transform(y_ood_labels)
+
+    pred = calibrated.predict(X_ood)
+    prob = calibrated.predict_proba(X_ood)
+    return {
+        "available": True,
+        "num_samples": int(len(keep_idx)),
+        "num_classes": int(len(set(y_ood_labels))),
+        "acc": float(accuracy_score(y_ood, pred)),
+        "f1_weighted": float(f1_score(y_ood, pred, average="weighted")),
+        "log_loss": float(log_loss(y_ood, prob, labels=np.arange(len(label_encoder.classes_)))),
+        "brier_multi": _multiclass_brier(y_ood, prob),
+    }
+
+
 def run_training(data_cfg: DataConfig, train_cfg: TrainConfig, out_note: str = "") -> Dict:
     ensure_kaggle_dataset(data_cfg.kaggle_dataset, data_cfg.data_dir)
 
@@ -120,6 +165,11 @@ def run_training(data_cfg: DataConfig, train_cfg: TrainConfig, out_note: str = "
     val_prob = calibrated.predict_proba(X_val)
     ext_pred = calibrated.predict(X_ext)
     ext_prob = calibrated.predict_proba(X_ext)
+    ood_report = {"available": False, "reason": "OOD validation disabled"}
+    if train_cfg.enable_ood_validation:
+        ensure_kaggle_dataset(data_cfg.ood_kaggle_dataset, data_cfg.ood_data_dir)
+        ood_df = load_training_dataframe(data_cfg.ood_csv)
+        ood_report = evaluate_ood_dataset(calibrated, label_encoder, vectorizer, ood_df)
 
     aux = load_aux_tables(data_cfg.description_csv, data_cfg.precaution_csv)
 
@@ -134,6 +184,7 @@ def run_training(data_cfg: DataConfig, train_cfg: TrainConfig, out_note: str = "
         "num_classes": int(len(label_encoder.classes_)),
         "num_symptoms": int(len(vectorizer.symptom_vocab)),
         "dataset_ref": data_cfg.kaggle_dataset,
+        "ood_dataset_ref": data_cfg.ood_kaggle_dataset,
         "validation": {
             "internal_acc": float(accuracy_score(y_val, val_pred)),
             "internal_f1_weighted": float(f1_score(y_val, val_pred, average="weighted")),
@@ -148,6 +199,7 @@ def run_training(data_cfg: DataConfig, train_cfg: TrainConfig, out_note: str = "
             ),
             "external_brier_multi": _multiclass_brier(y_ext, ext_prob),
         },
+        "ood_validation": ood_report,
         "data_leakage_checks": {
             "total_rows_after_cleaning": int(len(samples)),
             "duplicate_symptom_signature_rows": int(len(signatures) - len(set(signatures))),
@@ -159,7 +211,9 @@ def run_training(data_cfg: DataConfig, train_cfg: TrainConfig, out_note: str = "
         "note": out_note,
         "trained_at_utc": ts,
     }
-    if metrics["validation"]["external_acc"] < 0.7:
+    if metrics["validation"]["external_acc"] < 0.7 or (
+        metrics["ood_validation"].get("available") and metrics["ood_validation"].get("acc", 0.0) < 0.7
+    ):
         metrics["reliability_note"] = (
             "External validation is weak; retrain with richer data before real-world use."
         )
@@ -195,10 +249,14 @@ def main() -> None:
     parser.add_argument("--dataset-ref", default=DataConfig.kaggle_dataset)
     parser.add_argument("--data-dir", default=DataConfig.data_dir)
     parser.add_argument("--train-csv", default=DataConfig.train_csv)
+    parser.add_argument("--ood-dataset-ref", default=DataConfig.ood_kaggle_dataset)
+    parser.add_argument("--ood-data-dir", default=DataConfig.ood_data_dir)
+    parser.add_argument("--ood-csv", default=DataConfig.ood_csv)
     parser.add_argument("--description-csv", default=DataConfig.description_csv)
     parser.add_argument("--precaution-csv", default=DataConfig.precaution_csv)
     parser.add_argument("--test-size", type=float, default=TrainConfig.test_size)
     parser.add_argument("--external-val-size", type=float, default=TrainConfig.external_val_size)
+    parser.add_argument("--disable-ood-validation", action="store_true")
     parser.add_argument("--seed", type=int, default=TrainConfig.random_seed)
     parser.add_argument("--registry-dir", default=TrainConfig.model_registry_dir)
     parser.add_argument("--latest-path", default=TrainConfig.latest_bundle_path)
@@ -209,6 +267,9 @@ def main() -> None:
         kaggle_dataset=args.dataset_ref,
         data_dir=args.data_dir,
         train_csv=args.train_csv,
+        ood_kaggle_dataset=args.ood_dataset_ref,
+        ood_data_dir=args.ood_data_dir,
+        ood_csv=args.ood_csv,
         severity_csv=DataConfig.severity_csv,
         description_csv=args.description_csv,
         precaution_csv=args.precaution_csv,
@@ -217,6 +278,7 @@ def main() -> None:
         random_seed=args.seed,
         test_size=args.test_size,
         external_val_size=args.external_val_size,
+        enable_ood_validation=not args.disable_ood_validation,
         model_registry_dir=args.registry_dir,
         latest_bundle_path=args.latest_path,
     )

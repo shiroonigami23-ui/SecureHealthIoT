@@ -48,3 +48,19 @@ class DiseasePredictor:
                 }
             )
         return out
+
+    def predict_with_abstain(self, symptoms: List[str], k: int = 3, abstain_threshold: float = 0.55):
+        preds = self.predict_top_k(symptoms, k=k)
+        if not preds:
+            return {"abstained": True, "reason": "No valid symptom input", "predictions": []}
+        top = preds[0]
+        if top["probability"] < abstain_threshold:
+            return {
+                "abstained": True,
+                "reason": (
+                    f"Top confidence {top['probability']:.3f} is below threshold "
+                    f"{abstain_threshold:.3f}; recommend clinical review."
+                ),
+                "predictions": preds,
+            }
+        return {"abstained": False, "reason": "", "predictions": preds}

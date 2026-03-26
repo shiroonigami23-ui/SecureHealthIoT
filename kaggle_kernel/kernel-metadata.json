@@ -9,7 +9,8 @@
   "enable_tpu": "false",
   "enable_internet": "true",
   "dataset_sources": [
-    "itachi9604/disease-symptom-description-dataset"
+    "itachi9604/disease-symptom-description-dataset",
+    "kaushil268/disease-prediction-using-machine-learning"
   ],
   "competition_sources": [],
   "kernel_sources": [],

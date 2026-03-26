@@ -4,6 +4,7 @@ Production-style symptom-based disease prediction stack with:
 
 - leakage-aware grouped splits
 - external validation split
+- out-of-domain validation on second independent dataset
 - probability calibration (`CalibratedClassifierCV`)
 - model versioning + reproducible Kaggle GPU training
 - Hugging Face model + dataset + Space deployment
@@ -21,19 +22,23 @@ Production-style symptom-based disease prediction stack with:
 2. Separate external validation set.
 3. Calibration using sigmoid scaling for more reliable probabilities.
 4. Leakage report in metrics (`overlap_signature_*` checks).
-5. Versioned artifacts in `artifacts/model_registry`.
+5. True OOD scoring using `kaushil268/disease-prediction-using-machine-learning`.
+6. Versioned artifacts in `artifacts/model_registry`.
 
 ## App Features
 
 1. Quick Symptom Predictor:
    - multi-select symptoms
    - top-3 predictions
+   - abstain/reject mode with configurable threshold
    - confidence band + precaution summary
+   - clinician-facing PDF report export
 2. Report/Image Assisted Analysis:
    - upload `.txt`, `.csv`, or `.pdf` report
    - optional image upload with quality diagnostics
    - symptom extraction from report text + combined prediction
-3. Medical safety disclaimer and decision-support framing.
+   - clinician-facing PDF report export
+3. Preliminary supportive-care and prescription guidance with strict medical disclaimer.
 
 ## Install
 
@@ -45,6 +50,12 @@ pip install -r requirements.txt
 
 ```bash
 python -m disease_ml.train --note "reliability_pass_v2"
+```
+
+To disable OOD validation:
+
+```bash
+python -m disease_ml.train --disable-ood-validation
 ```
 
 Outputs:
@@ -90,3 +101,4 @@ python scripts/publish_space.py --space-id ShiroOnigami23/securehealthiot-diseas
 ## Medical Notice
 
 This software is for educational and decision-support usage. It is not a medical device and not a replacement for licensed clinical judgment.
+Any prescription decision must be made by a licensed physician after direct consultation.

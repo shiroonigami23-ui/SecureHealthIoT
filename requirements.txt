@@ -7,3 +7,4 @@ huggingface_hub>=0.30.0
 kaggle>=2.0.0
 pypdf>=5.0.0
 Pillow>=10.0.0
+reportlab>=4.2.0

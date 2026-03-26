@@ -1,5 +1,7 @@
 import json
+import difflib
 from pathlib import Path
+import re
 
 import joblib
 import numpy as np
@@ -42,6 +44,88 @@ def multiclass_brier(y_true: np.ndarray, probs: np.ndarray) -> float:
     return float(np.mean(np.sum((probs - one_hot) ** 2, axis=1)))
 
 
+def normalize_label(s: str) -> str:
+    t = str(s).strip().lower().replace("_", " ")
+    t = re.sub(r"[^a-z0-9]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def align_label(norm_label: str, available_norm_labels: list[str]):
+    if norm_label in available_norm_labels:
+        return norm_label
+    match = difflib.get_close_matches(norm_label, available_norm_labels, n=1, cutoff=0.82)
+    return match[0] if match else None
+
+
+def extract_samples_from_primary(df):
+    samples, labels, signatures = [], [], []
+    for row in df.itertuples(index=False):
+        disease = str(row[0]).strip()
+        syms = sorted(set([s for s in row[1:] if s]))
+        if syms:
+            samples.append(syms)
+            labels.append(disease)
+            signatures.append("|".join(syms))
+    return samples, labels, signatures
+
+
+def extract_samples_from_onehot(df):
+    if "prognosis" in df.columns and "Disease" not in df.columns:
+        df = df.rename(columns={"prognosis": "Disease"})
+    symptom_cols = [c for c in df.columns if c != "Disease"]
+    out_samples, out_labels = [], []
+    for _, row in df.iterrows():
+        d = str(row["Disease"]).strip()
+        syms = []
+        for col in symptom_cols:
+            v = row[col]
+            present = False
+            if isinstance(v, (int, float)):
+                present = float(v) > 0.0
+            else:
+                present = str(v).strip().lower() in {"1", "true", "yes", "y", "present"}
+            if present:
+                syms.append(str(col).strip().lower().replace(" ", "_"))
+        syms = sorted(set(syms))
+        if syms:
+            out_samples.append(syms)
+            out_labels.append(d)
+    return out_samples, out_labels
+
+
+def evaluate_ood(calibrated, le, mlb):
+    ood_candidates = [p for p in INPUT_ROOT.rglob("Training.csv")]
+    if not ood_candidates:
+        return {"available": False, "reason": "No secondary OOD CSV found (Training.csv)"}
+    ood_df = pd.read_csv(ood_candidates[0])
+    ood_samples, ood_labels = extract_samples_from_onehot(ood_df)
+    if not ood_samples:
+        return {"available": False, "reason": "No valid samples in OOD dataset"}
+
+    train_norm = {normalize_label(x): x for x in le.classes_}
+    train_keys = list(train_norm.keys())
+    ood_norm = [normalize_label(x) for x in ood_labels]
+    aligned = [align_label(lbl, train_keys) for lbl in ood_norm]
+    keep_idx = [i for i, lbl in enumerate(aligned) if lbl is not None]
+    if len(keep_idx) < 20:
+        return {"available": False, "reason": "Insufficient overlapping labels for OOD evaluation"}
+
+    X_ood = mlb.transform([ood_samples[i] for i in keep_idx]).astype(np.float32)
+    y_ood_labels = [train_norm[aligned[i]] for i in keep_idx]
+    y_ood = le.transform(y_ood_labels)
+    pred = calibrated.predict(X_ood)
+    prob = calibrated.predict_proba(X_ood)
+    return {
+        "available": True,
+        "num_samples": int(len(keep_idx)),
+        "num_classes": int(len(set(y_ood_labels))),
+        "acc": float(accuracy_score(y_ood, pred)),
+        "f1_weighted": float(f1_score(y_ood, pred, average="weighted")),
+        "log_loss": float(log_loss(y_ood, prob, labels=np.arange(len(le.classes_)))),
+        "brier_multi": multiclass_brier(y_ood, prob),
+    }
+
+
 def main():
     dataset_candidates = list(INPUT_ROOT.rglob("dataset.csv"))
     if not dataset_candidates:
@@ -56,16 +140,7 @@ def main():
     cleaned_path = WORK_DIR / "cleaned_dataset.csv"
     df.to_csv(cleaned_path, index=False)
 
-    samples = []
-    labels = []
-    signatures = []
-    for row in df.itertuples(index=False):
-        disease = row[0]
-        syms = sorted(set([s for s in row[1:] if s]))
-        if syms:
-            samples.append(syms)
-            labels.append(disease)
-            signatures.append("|".join(syms))
+    samples, labels, signatures = extract_samples_from_primary(df)
 
     mlb = MultiLabelBinarizer()
     X = mlb.fit_transform(samples).astype(np.float32)
@@ -138,6 +213,7 @@ def main():
     val_prob = calibrated.predict_proba(X_val)
     ext_pred = calibrated.predict(X_ext)
     ext_prob = calibrated.predict_proba(X_ext)
+    ood_metrics = evaluate_ood(calibrated, le, mlb)
 
     metrics = {
         "best_model": best_name,
@@ -146,21 +222,19 @@ def main():
         "num_classes": int(len(le.classes_)),
         "num_symptoms": int(len(mlb.classes_)),
         "dataset": "itachi9604/disease-symptom-description-dataset",
+        "ood_dataset": "kaushil268/disease-prediction-using-machine-learning",
         "accelerator_requested": accelerator,
         "validation": {
             "internal_acc": float(accuracy_score(y_val, val_pred)),
             "internal_f1_weighted": float(f1_score(y_val, val_pred, average="weighted")),
-            "internal_log_loss": float(
-                log_loss(y_val, val_prob, labels=np.arange(len(le.classes_)))
-            ),
+            "internal_log_loss": float(log_loss(y_val, val_prob, labels=np.arange(len(le.classes_)))),
             "internal_brier_multi": multiclass_brier(y_val, val_prob),
             "external_acc": float(accuracy_score(y_ext, ext_pred)),
             "external_f1_weighted": float(f1_score(y_ext, ext_pred, average="weighted")),
-            "external_log_loss": float(
-                log_loss(y_ext, ext_prob, labels=np.arange(len(le.classes_)))
-            ),
+            "external_log_loss": float(log_loss(y_ext, ext_prob, labels=np.arange(len(le.classes_)))),
             "external_brier_multi": multiclass_brier(y_ext, ext_prob),
         },
+        "ood_validation": ood_metrics,
         "data_leakage_checks": {
             "duplicate_symptom_signature_rows": int(len(signatures) - len(set(signatures))),
             "overlap_signature_train_val": int(len(set(sig_train) & set(sig_val))),
