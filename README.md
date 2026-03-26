@@ -1,59 +1,112 @@
-# 🏥 SecureHealthIoT
+# SecureHealthIoT Disease Prediction
 
-![Status](https://img.shields.io/badge/Status-Live-success)
-![Category](https://img.shields.io/badge/Category-HealthTech-red)
-![Security](https://img.shields.io/badge/Security-Encrypted-blue)
+End-to-end symptom-based disease prediction pipeline with:
 
-> **A secure, real-time remote patient monitoring dashboard for IoT health devices.**
+- Kaggle dataset ingestion
+- reproducible training + model versioning
+- Gradio inference app
+- Hugging Face Model + Space publishing scripts
 
-**SecureHealthIoT** is a web-based platform designed to bridge the gap between IoT medical sensors and healthcare providers. It visualizes vital patient data (Heart Rate, Temperature, SpO2) in real-time while ensuring data privacy and secure access control.
+## Live Deployment
 
----
+- Hugging Face Model: https://huggingface.co/ShiroOnigami23/securehealthiot-disease-model
+- Hugging Face Space (Direct Use): https://huggingface.co/spaces/ShiroOnigami23/securehealthiot-disease-app
 
-## 🔗 Live Demo
+## Latest Training Snapshot
 
-**Access the dashboard here:**
-### [🩺 Launch SecureHealthIoT](https://shiroonigami23-ui.github.io/SecureHealthIoT/)
+- Dataset: `itachi9604/disease-symptom-description-dataset`
+- Samples: `4920`
+- Classes: `41`
+- Best model: `LogisticRegression`
+- Holdout Accuracy: `1.00`
+- Weighted F1: `1.00`
 
----
+## Pipeline
 
-## ✨ Key Features
+1. Download dataset from Kaggle  
+2. Train multiple models (`LogisticRegression`, `RandomForest`, `ExtraTrees`)  
+3. Select best model by holdout/CV accuracy  
+4. Save versioned artifacts in `artifacts/model_registry/...`  
+5. Publish model to Hugging Face  
+6. Publish app to Hugging Face Spaces
 
-### 📊 Real-Time Health Monitoring
-- **Live Vitals:** Visualizes sensor data such as **Heart Rate (BPM)**, **Body Temperature**, and **Oxygen Saturation (SpO2)**.
-- **Dynamic Charts:** Uses interactive graphs to show trends over time (Hourly/Daily).
-- **Device Status:** Monitors battery life and connectivity of connected IoT devices.
+## Dataset
 
-### 🔐 Security & Privacy
-- **Secure Authentication:** Role-based login for Doctors, Patients, and Admins.
-- **Data Integrity:** Ensures patient data is displayed accurately without unauthorized manipulation.
-- **Access Control:** Restricted views ensuring doctors only see their assigned patients.
+Default Kaggle dataset:
 
-### 🚨 Alert System
-- **Critical Thresholds:** Automatically triggers visual alerts if vitals go beyond safe limits (e.g., Temperature > 102°F or BPM > 120).
-- **Emergency Notifications:** UI indicators for immediate attention.
+- `itachi9604/disease-symptom-description-dataset`
 
-### 📱 Responsive Dashboard
-- **Cross-Platform:** Optimized for Desktops, Tablets, and Mobile devices for on-the-go monitoring.
-- **User-Friendly Interface:** Clean, medical-grade UI design with Dark/Light mode support.
+Main file used:
 
----
+- `data/kaggle_raw/dataset.csv`
 
-## 🎮 How to Use
+## Install
 
-1. **Login:** Access the portal using your credentials.
-2. **Select Patient:** From the dashboard, select a patient to view their specific data.
-3. **Monitor:** Watch the live graphs update as simulated/real IoT data comes in.
-4. **Check Alerts:** Pay attention to the notification panel for any critical warnings.
-5. **History:** Navigate to the "History" tab to view past medical records.
+```bash
+pip install -r requirements.txt
+```
 
----
+## Kaggle Auth Setup
 
-## 💻 Local Installation
+Put your Kaggle API token JSON at:
 
-To run this project locally on your machine:
+- `%USERPROFILE%\.kaggle\kaggle.json` (Windows)
 
-1. **Clone the repository:**
-   ```bash
-   git clone [https://github.com/shiroonigami23-ui/SecureHealthIoT.git](https://github.com/shiroonigami23-ui/SecureHealthIoT.git)
-   
+Helper:
+
+```bash
+python scripts/setup_kaggle_auth.py
+```
+
+## Train + Version
+
+```bash
+python -m disease_ml.train --note "baseline_v1"
+```
+
+Outputs:
+
+- `artifacts/latest_model.joblib`
+- `artifacts/model_registry/<timestamp>_<model>/model_bundle.joblib`
+- `artifacts/model_registry/<timestamp>_<model>/metrics.json`
+
+## Run Local App
+
+```bash
+python app.py
+```
+
+Open:
+
+- `http://localhost:7860`
+
+## Publish Model to Hugging Face
+
+Set token:
+
+```bash
+set HF_TOKEN=YOUR_TOKEN
+```
+
+Upload:
+
+```bash
+python scripts/upload_model_to_hf.py --repo-id ShiroOnigami23/securehealthiot-disease-model
+```
+
+## Publish Hugging Face Space
+
+```bash
+python scripts/publish_space.py --space-id ShiroOnigami23/securehealthiot-disease-app --model-repo-id ShiroOnigami23/securehealthiot-disease-model
+```
+
+## Docker
+
+```bash
+docker build -t securehealthiot-disease .
+docker run -p 7860:7860 securehealthiot-disease
+```
+
+## Notes
+
+- The production disease prediction stack is in `disease_ml/`, `scripts/`, and root `app.py`.

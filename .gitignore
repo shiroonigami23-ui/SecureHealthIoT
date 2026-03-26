@@ -1,0 +1,27 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+
+.venv/
+venv/
+
+data/
+artifacts/
+
+*.log
+*.tmp
+*.bak
+
+kaggle.json
+*.pt
+*.pth
+*.joblib
+
+# Scratch/debug files
+__*.py
+__*.sh
