@@ -9,9 +9,14 @@ from huggingface_hub import HfApi, create_repo
 
 SPACE_APP = r'''
 import json
+import re
+from datetime import datetime
+
 import gradio as gr
 import joblib
 import numpy as np
+from PIL import Image
+from pypdf import PdfReader
 from huggingface_hub import hf_hub_download
 
 MODEL_REPO_ID = "REPLACE_MODEL_REPO"
@@ -24,6 +29,15 @@ vectorizer = bundle.get("vectorizer")
 symptom_binarizer = bundle.get("symptom_binarizer")
 aux = bundle.get("aux", {"descriptions": {}, "precautions": {}})
 
+def symptom_vocab():
+    if vectorizer is not None and hasattr(vectorizer, "symptom_vocab"):
+        return list(vectorizer.symptom_vocab)
+    if symptom_binarizer is not None and hasattr(symptom_binarizer, "classes_"):
+        return list(symptom_binarizer.classes_)
+    return []
+
+SYMPTOMS = symptom_vocab()
+
 def normalize(symptoms):
     return sorted(set([s.strip().lower().replace(" ", "_") for s in symptoms if s and s.strip()]))
 
@@ -34,43 +48,130 @@ def transform(symptoms):
         return symptom_binarizer.transform([symptoms]).astype(np.float32)
     raise RuntimeError("No vectorizer/symptom_binarizer found in model bundle.")
 
-def predict(symptoms):
+def confidence_band(prob):
+    if prob >= 0.8:
+        return "High"
+    if prob >= 0.55:
+        return "Moderate"
+    return "Low"
+
+def format_precautions(items):
+    if not items:
+        return "No precaution data available."
+    return "\n".join([f"- {x}" for x in items])
+
+def extract_text_from_report(file_path):
+    if not file_path:
+        return ""
+    if file_path.lower().endswith((".txt", ".csv")):
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+    if file_path.lower().endswith(".pdf"):
+        reader = PdfReader(file_path)
+        return "\n".join([(page.extract_text() or "") for page in reader.pages])
+    return ""
+
+def extract_symptoms_from_text(text):
+    if not text.strip():
+        return []
+    t = re.sub(r"[^a-z0-9\s]", " ", text.lower())
+    t = re.sub(r"\s+", " ", t).strip()
+    out = []
+    for s in SYMPTOMS:
+        if s.replace("_", " ") in t:
+            out.append(s)
+    return sorted(set(out))
+
+def image_quality_note(image_path):
+    if not image_path:
+        return "No image uploaded."
+    try:
+        img = Image.open(image_path).convert("L")
+        arr = np.asarray(img, dtype=np.float32)
+        brightness = float(arr.mean())
+        contrast = float(arr.std())
+        quality = "Good"
+        if brightness < 35 or brightness > 220 or contrast < 18:
+            quality = "Needs Better Scan"
+        return f"Image analysis: {img.width}x{img.height}px, brightness={brightness:.1f}, contrast={contrast:.1f}, quality={quality}."
+    except Exception as exc:
+        return f"Image analysis unavailable: {exc}"
+
+def infer(symptoms, source_note="symptom_form"):
+    symptoms = normalize(symptoms or [])
     if not symptoms:
-        return "Please select at least one symptom.", "", ""
-    normalized = normalize(symptoms)
-    X = transform(normalized)
+        return "Please select at least one symptom.", "{}", "", ""
+    X = transform(symptoms)
     probs = model.predict_proba(X)[0]
     top_idx = probs.argsort()[::-1][:3]
     pred = []
     for idx in top_idx:
         disease = label_encoder.inverse_transform([idx])[0]
         pred.append((disease, float(probs[idx])))
-    top_disease = pred[0][0]
+    top_disease, top_prob = pred[0]
     details = {
+        "timestamp_utc": datetime.utcnow().isoformat(),
+        "source": source_note,
+        "selected_symptoms": symptoms,
         "predicted_disease": top_disease,
-        "probability": pred[0][1],
+        "probability": top_prob,
+        "confidence_band": confidence_band(top_prob),
         "description": aux["descriptions"].get(top_disease, ""),
         "precautions": aux["precautions"].get(top_disease, []),
     }
     pretty = {d: round(p, 4) for d, p in pred}
-    precaution_text = "\n".join([f"- {p}" for p in details["precautions"]]) if details["precautions"] else "N/A"
-    return pretty, json.dumps(details, indent=2), precaution_text
+    precautions = format_precautions(details["precautions"])
+    summary = (
+        f"### Predicted condition: **{top_disease}**\n"
+        f"- Confidence: **{top_prob:.3f} ({confidence_band(top_prob)})**\n"
+        f"- Description: {details['description'] or 'Not available'}\n\n"
+        f"### Suggested precautions\n{precautions}\n\n"
+        "### Safety note\n"
+        "This tool is decision support, not a clinical diagnosis."
+    )
+    return pretty, json.dumps(details, indent=2), precautions, summary
 
-if vectorizer is not None and hasattr(vectorizer, "symptom_vocab"):
-    symptoms = list(vectorizer.symptom_vocab)
-elif symptom_binarizer is not None and hasattr(symptom_binarizer, "classes_"):
-    symptoms = list(symptom_binarizer.classes_)
-else:
-    symptoms = []
+def analyze_report(report_file, image_file, manual_symptoms):
+    text = extract_text_from_report(report_file) if report_file else ""
+    extracted = extract_symptoms_from_text(text)
+    manual = normalize(manual_symptoms or [])
+    symptoms = sorted(set(extracted + manual))
+    if not symptoms:
+        msg = "Could not detect known symptoms from the report. Add symptoms manually."
+        return msg, "{}", "No precautions available.", "", image_quality_note(image_file)
+    probs, details, precautions, summary = infer(symptoms, source_note="report_image_assisted")
+    return probs, details, precautions, ", ".join(symptoms), summary + "\n\n" + image_quality_note(image_file)
 
 with gr.Blocks(title="SecureHealthIoT Disease Predictor") as demo:
     gr.Markdown("# SecureHealthIoT Disease Predictor")
-    inp = gr.Dropdown(choices=symptoms, multiselect=True, label="Symptoms")
-    btn = gr.Button("Predict", variant="primary")
-    out1 = gr.Label(label="Top Predictions")
-    out2 = gr.Code(label="Prediction Details", language="json")
-    out3 = gr.Markdown(label="Precautions")
-    btn.click(predict, inputs=[inp], outputs=[out1, out2, out3])
+    gr.Markdown("Symptom-based predictor with report/image-assisted analysis.")
+    gr.Markdown("**Medical disclaimer:** Not a replacement for professional diagnosis.")
+
+    with gr.Tabs():
+        with gr.Tab("Quick Symptom Predictor"):
+            symptom_input = gr.Dropdown(choices=SYMPTOMS, multiselect=True, label="Symptoms")
+            btn = gr.Button("Predict", variant="primary")
+            out1 = gr.Label(label="Top Predictions")
+            out2 = gr.Code(label="Prediction Details", language="json")
+            out3 = gr.Markdown(label="Precautions")
+            out4 = gr.Markdown(label="Summary")
+            btn.click(infer, inputs=[symptom_input], outputs=[out1, out2, out3, out4])
+
+        with gr.Tab("Report/Image Assisted Analysis"):
+            report_file = gr.File(label="Medical Report File", file_types=[".txt", ".csv", ".pdf"])
+            image_file = gr.Image(type="filepath", label="Optional Clinical Image")
+            manual_symptoms = gr.Dropdown(choices=SYMPTOMS, multiselect=True, label="Manual Symptoms (optional)")
+            run_report = gr.Button("Analyze Report + Predict", variant="primary")
+            rep1 = gr.Label(label="Top Predictions")
+            rep2 = gr.Code(label="Prediction Details", language="json")
+            rep3 = gr.Markdown(label="Precautions")
+            rep4 = gr.Textbox(label="Detected Symptoms Used")
+            rep5 = gr.Markdown(label="Report Summary")
+            run_report.click(
+                analyze_report,
+                inputs=[report_file, image_file, manual_symptoms],
+                outputs=[rep1, rep2, rep3, rep4, rep5],
+            )
 
 if __name__ == "__main__":
     demo.launch()
@@ -103,7 +204,7 @@ pinned: false
 
 # SecureHealthIoT Disease Predictor
 
-Symptom-based disease prediction Space.
+Symptom-based disease prediction Space with report/image-assisted analysis.
 Model source: `{args.model_repo_id}`.
 """
 
@@ -113,7 +214,10 @@ Model source: `{args.model_repo_id}`.
     tmp.mkdir(parents=True, exist_ok=True)
     (tmp / "README.md").write_text(readme, encoding="utf-8")
     (tmp / "app.py").write_text(app_code, encoding="utf-8")
-    (tmp / "requirements.txt").write_text("gradio\njoblib\nhuggingface_hub\nscikit-learn\nnumpy\n", encoding="utf-8")
+    (tmp / "requirements.txt").write_text(
+        "gradio\njoblib\nhuggingface_hub\nscikit-learn\nnumpy\npypdf\nPillow\n",
+        encoding="utf-8",
+    )
 
     api.upload_folder(folder_path=str(tmp), repo_id=args.space_id, repo_type="space")
     print(f"Published Space: https://huggingface.co/spaces/{args.space_id}")

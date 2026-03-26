@@ -15,6 +15,6 @@ class DataConfig:
 class TrainConfig:
     random_seed: int = 42
     test_size: float = 0.2
+    external_val_size: float = 0.15
     model_registry_dir: str = "artifacts/model_registry"
     latest_bundle_path: str = "artifacts/latest_model.joblib"
-

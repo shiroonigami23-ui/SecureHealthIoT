@@ -9,10 +9,12 @@ from typing import Dict, Tuple
 
 import joblib
 import numpy as np
+from sklearn.base import clone
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score
-from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
+from sklearn.metrics import accuracy_score, f1_score, log_loss
+from sklearn.model_selection import GroupShuffleSplit, StratifiedKFold, cross_val_score, train_test_split
 from sklearn.preprocessing import LabelEncoder
 
 from disease_ml.config import DataConfig, TrainConfig
@@ -40,7 +42,7 @@ def build_candidates(seed: int):
     }
 
 
-def evaluate_candidates(X_train, y_train, X_test, y_test, seed: int) -> Tuple[str, Dict[str, CandidateResult], object]:
+def evaluate_candidates(X_train, y_train, X_val, y_val, seed: int) -> Tuple[str, Dict[str, CandidateResult], object]:
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
     results: Dict[str, CandidateResult] = {}
     fitted_models = {}
@@ -48,12 +50,12 @@ def evaluate_candidates(X_train, y_train, X_test, y_test, seed: int) -> Tuple[st
     for name, model in build_candidates(seed).items():
         cv_scores = cross_val_score(model, X_train, y_train, cv=cv, scoring="accuracy", n_jobs=-1)
         model.fit(X_train, y_train)
-        preds = model.predict(X_test)
+        preds = model.predict(X_val)
         results[name] = CandidateResult(
             name=name,
             cv_acc_mean=float(np.mean(cv_scores)),
-            holdout_acc=float(accuracy_score(y_test, preds)),
-            holdout_f1_weighted=float(f1_score(y_test, preds, average="weighted")),
+            holdout_acc=float(accuracy_score(y_val, preds)),
+            holdout_f1_weighted=float(f1_score(y_val, preds, average="weighted")),
         )
         fitted_models[name] = model
 
@@ -61,24 +63,63 @@ def evaluate_candidates(X_train, y_train, X_test, y_test, seed: int) -> Tuple[st
     return best_name, results, fitted_models[best_name]
 
 
+def _make_grouped_split_indices(y, groups, test_size: float, seed: int):
+    if len(set(groups)) > 10:
+        gss = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=seed)
+        idx_a, idx_b = next(gss.split(np.zeros(len(y)), y, groups))
+        return np.asarray(idx_a), np.asarray(idx_b)
+    return train_test_split(
+        np.arange(len(y)),
+        test_size=test_size,
+        random_state=seed,
+        stratify=y,
+    )
+
+
+def _multiclass_brier(y_true: np.ndarray, probs: np.ndarray) -> float:
+    one_hot = np.eye(probs.shape[1], dtype=np.float32)[y_true]
+    return float(np.mean(np.sum((probs - one_hot) ** 2, axis=1)))
+
+
 def run_training(data_cfg: DataConfig, train_cfg: TrainConfig, out_note: str = "") -> Dict:
     ensure_kaggle_dataset(data_cfg.kaggle_dataset, data_cfg.data_dir)
 
     df = load_training_dataframe(data_cfg.train_csv)
     samples, labels = extract_samples(df)
+    signatures = ["|".join(s) for s in samples]
+
     vectorizer = SymptomVectorizer()
     X = vectorizer.fit_transform(samples)
 
     label_encoder = LabelEncoder()
     y = label_encoder.fit_transform(labels)
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=train_cfg.test_size, random_state=train_cfg.random_seed, stratify=y
+    dev_idx, ext_idx = _make_grouped_split_indices(
+        y, signatures, test_size=train_cfg.external_val_size, seed=train_cfg.random_seed
     )
+    X_dev, y_dev = X[dev_idx], y[dev_idx]
+    sig_dev = [signatures[i] for i in dev_idx]
+    X_ext, y_ext = X[ext_idx], y[ext_idx]
+    sig_ext = [signatures[i] for i in ext_idx]
+
+    train_rel, val_rel = _make_grouped_split_indices(
+        y_dev, sig_dev, test_size=train_cfg.test_size, seed=train_cfg.random_seed
+    )
+    X_train, y_train = X_dev[train_rel], y_dev[train_rel]
+    X_val, y_val = X_dev[val_rel], y_dev[val_rel]
+    sig_train = [sig_dev[i] for i in train_rel]
+    sig_val = [sig_dev[i] for i in val_rel]
 
     best_name, results, best_model = evaluate_candidates(
-        X_train, y_train, X_test, y_test, seed=train_cfg.random_seed
+        X_train, y_train, X_val, y_val, seed=train_cfg.random_seed
     )
+    calibrated = CalibratedClassifierCV(estimator=clone(best_model), method="sigmoid", cv=3)
+    calibrated.fit(X_train, y_train)
+
+    val_pred = calibrated.predict(X_val)
+    val_prob = calibrated.predict_proba(X_val)
+    ext_pred = calibrated.predict(X_ext)
+    ext_prob = calibrated.predict_proba(X_ext)
 
     aux = load_aux_tables(data_cfg.description_csv, data_cfg.precaution_csv)
 
@@ -93,16 +134,48 @@ def run_training(data_cfg: DataConfig, train_cfg: TrainConfig, out_note: str = "
         "num_classes": int(len(label_encoder.classes_)),
         "num_symptoms": int(len(vectorizer.symptom_vocab)),
         "dataset_ref": data_cfg.kaggle_dataset,
+        "validation": {
+            "internal_acc": float(accuracy_score(y_val, val_pred)),
+            "internal_f1_weighted": float(f1_score(y_val, val_pred, average="weighted")),
+            "internal_log_loss": float(
+                log_loss(y_val, val_prob, labels=np.arange(len(label_encoder.classes_)))
+            ),
+            "internal_brier_multi": _multiclass_brier(y_val, val_prob),
+            "external_acc": float(accuracy_score(y_ext, ext_pred)),
+            "external_f1_weighted": float(f1_score(y_ext, ext_pred, average="weighted")),
+            "external_log_loss": float(
+                log_loss(y_ext, ext_prob, labels=np.arange(len(label_encoder.classes_)))
+            ),
+            "external_brier_multi": _multiclass_brier(y_ext, ext_prob),
+        },
+        "data_leakage_checks": {
+            "total_rows_after_cleaning": int(len(samples)),
+            "duplicate_symptom_signature_rows": int(len(signatures) - len(set(signatures))),
+            "overlap_signature_train_val": int(len(set(sig_train) & set(sig_val))),
+            "overlap_signature_train_external": int(len(set(sig_train) & set(sig_ext))),
+            "overlap_signature_val_external": int(len(set(sig_val) & set(sig_ext))),
+            "external_split_strategy": "grouped_by_symptom_signature",
+        },
         "note": out_note,
         "trained_at_utc": ts,
     }
+    if metrics["validation"]["external_acc"] < 0.7:
+        metrics["reliability_note"] = (
+            "External validation is weak; retrain with richer data before real-world use."
+        )
+    else:
+        metrics["reliability_note"] = (
+            "Model passed external validation on held-out symptom signatures. "
+            "Use as decision support only, not definitive diagnosis."
+        )
 
     bundle = {
-        "model": best_model,
+        "model": calibrated,
         "label_encoder": label_encoder,
         "vectorizer": vectorizer,
         "metrics": metrics,
         "aux": aux,
+        "calibration": {"method": "sigmoid", "cv": 3},
     }
 
     bundle_path = version_dir / "model_bundle.joblib"
@@ -125,6 +198,7 @@ def main() -> None:
     parser.add_argument("--description-csv", default=DataConfig.description_csv)
     parser.add_argument("--precaution-csv", default=DataConfig.precaution_csv)
     parser.add_argument("--test-size", type=float, default=TrainConfig.test_size)
+    parser.add_argument("--external-val-size", type=float, default=TrainConfig.external_val_size)
     parser.add_argument("--seed", type=int, default=TrainConfig.random_seed)
     parser.add_argument("--registry-dir", default=TrainConfig.model_registry_dir)
     parser.add_argument("--latest-path", default=TrainConfig.latest_bundle_path)
@@ -142,6 +216,7 @@ def main() -> None:
     train_cfg = TrainConfig(
         random_seed=args.seed,
         test_size=args.test_size,
+        external_val_size=args.external_val_size,
         model_registry_dir=args.registry_dir,
         latest_bundle_path=args.latest_path,
     )

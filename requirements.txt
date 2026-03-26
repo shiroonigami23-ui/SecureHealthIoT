@@ -5,3 +5,5 @@ joblib>=1.4.0
 gradio>=5.24.0
 huggingface_hub>=0.30.0
 kaggle>=2.0.0
+pypdf>=5.0.0
+Pillow>=10.0.0
